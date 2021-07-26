@@ -10,8 +10,12 @@ terraform {
 provider "aws" {
   region = "us-west-2"
 }
+## WHAT THIS AIMS TO ACHIEVE:
+## 1. Set up our own Virtual Private Cloud (VPC) -> Subnet for our Kubernetes exercises
+## 2. Set up firewall rules 
+## 3. Set up 6 Compute instances - 3 instances for the control nodes and 3 instances for the worker nodes
 
-
+# Set up VPC
 resource "aws_vpc" "my-vpc" {
   cidr_block = "10.240.0.0/24"
 
@@ -20,36 +24,19 @@ resource "aws_vpc" "my-vpc" {
   }
 }
 
+# Subnet for the above VPC
 resource "aws_subnet" "my-subnet" {
   vpc_id            = aws_vpc.my-vpc.id
   cidr_block        = "10.240.0.0/24"
   availability_zone = "us-west-2a"
 }
 
-# Security groups
-# resource "aws_security_group_rule" "incoming" {
-#   type              = "ingress"
-#   from_port         = 0
-#   to_port           = 65535
-#   protocol          = "all"
-#   # cidr_blocks       = [aws_vpc.my-vpc.cidr_block]
-#   # ipv6_cidr_blocks  = [aws_vpc.my-vpc.ipv6_cidr_block]
-#   security_group_id = "sg-123456"
-# }
-
-# resource "aws_security_group_rule" "outgoing" {
-#   type              = "egress"
-#   to_port           = 0
-#   protocol          = "-1"
-#   prefix_list_ids   = [aws_vpc_endpoint.my-vpc-endpoint.prefix_list_id]
-#   from_port         = 0
-#   security_group_id = "sg-123456"
-# }
-
+# Traffic rules for our VPC. Only allow SSH, HTTP and ICMP (from external sources)
 resource "aws_security_group" "vpc-traffic-rules" {
   description = "Traffic rules for VPC"
   vpc_id      = aws_vpc.my-vpc.id
 
+  # Allow all protocols and ports to be run internally within the subnet
   ingress = [
     {
       description      = "tcp, icmp, udp"
@@ -64,6 +51,7 @@ resource "aws_security_group" "vpc-traffic-rules" {
     }
   ]
 
+  # Allow only SSH, HTTPS and ICMP from external network calls
   egress = [
     {
       description      = "SSH"
@@ -110,12 +98,14 @@ resource "aws_internet_gateway" "my-gateway" {
   }
 }
 
+# Network load balancer
 resource "aws_lb" "my-nlb" {
   name               = "knlb"
   internal           = false
   load_balancer_type = "network"
   subnets            = aws_subnet.my-subnet.*.id
 
+  # avoid keeping this as true
   enable_deletion_protection = false
 
   tags = {
@@ -123,7 +113,7 @@ resource "aws_lb" "my-nlb" {
   }
 }
 
-# EC2 instances
+# EC2 config values
 variable "instance_conf" {
   type = map(string)
   default = {
@@ -133,16 +123,19 @@ variable "instance_conf" {
   }
 }
 
+# Kubernetes control node IPs within our subnet
 variable "control-ips" {
   type    = list(string)
   default = ["10.240.0.10", "10.240.0.11", "10.240.0.12"]
 }
 
+# Kubernetes worker node IPs within our subnet
 variable "worker-ips" {
   type    = list(string)
   default = ["10.240.0.20", "10.240.0.21", "10.240.0.22"]
 }
 
+# Use locals to store a var within another var. 
 locals {
   ec2_conf = {
     count         = 3
@@ -151,12 +144,10 @@ locals {
   }
 }
 
-# access using local.ec2_conf
-
-# ec2 network interface
+# Network interface for our kubernetes control nodes - set the IPs defined above to this.
+# We will be connecting this to our EC2 control node instance to enable internal networking 
 resource "aws_network_interface" "control-plane" {
   subnet_id = aws_subnet.my-subnet.id
-  # private_ips = ["10.240.0.10"]
 
   count       = length(var.control-ips)
   private_ips = [var.control-ips[count.index]]
@@ -166,9 +157,10 @@ resource "aws_network_interface" "control-plane" {
   }
 }
 
+# Network interface for our worker nodes - set the IPs defined in the variable above to this.
+# We will be connecting this to our EC2 control node instance to enable internal networking 
 resource "aws_network_interface" "worker-node" {
   subnet_id = aws_subnet.my-subnet.id
-  # private_ips = ["10.240.0.20"]
 
   count       = length(var.worker-ips)
   private_ips = [var.worker-ips[count.index]]
@@ -178,7 +170,7 @@ resource "aws_network_interface" "worker-node" {
   }
 }
 
-#ec2 instances
+# Set up an EC2 instance for each control node we've defined (3 in our case).
 resource "aws_instance" "control-plane-ec2" {
   ami           = local.ec2_conf.ami
   instance_type = local.ec2_conf.instance_type
@@ -195,6 +187,7 @@ resource "aws_instance" "control-plane-ec2" {
   }
 }
 
+# Set up an EC2 instance for each worker node we've defined (3 in our case).
 resource "aws_instance" "worker-nodes-ec2" {
   ami           = local.ec2_conf.ami
   instance_type = local.ec2_conf.instance_type
@@ -205,14 +198,16 @@ resource "aws_instance" "worker-nodes-ec2" {
     network_interface_id = aws_network_interface.worker-node[count.index].id
     device_index         = 0
   }
-  
+
   tags = {
     "Name" = "worker-nodes-kubernetes-${count.index}"
   }
 }
 
 
+# All output values to be thrown here
 
+# Network Load Balancer DNS Name output
 output "nlb_dns" {
   value = aws_lb.my-nlb.dns_name
 }
